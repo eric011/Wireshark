@@ -74,6 +74,8 @@ static gint ett_ts_confirm_active_pdu = -1;
 static gint ett_ts_capability_sets = -1;
 static gint ett_ts_caps_set = -1;
 
+#define TCP_PORT_RDP                3389
+
 #define SEC_EXCHANGE_PKT			0x0001
 #define SEC_ENCRYPT				0x0008
 #define SEC_RESET_SEQNO				0x0010
@@ -560,32 +562,119 @@ dissect_x224(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree)
 }
 
 static void
-dissect_tpkt(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree)
+dissect_tpkt(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree,
+             gboolean desegment)
 {
-	guint8 version;
-	guint16 length;
+    proto_item *ti = NULL;
+    proto_item *tpkt_tree = NULL;
+	//guint8 version;
+	volatile int length;
+    int length_remaining;
+    int data_len;
+    tvbuff_t *volatile next_tvb;
+    const char* saved_proto = NULL;
 
-	if (tree)
-	{
-		bytes = tvb_length_remaining(tvb, 0);
+    // empty COL_INFO column when reassembling
+    if (desegment && check_col(pinfo->cinfo, COL_INFO)) {
+        col_set_str(pinfo->cinfo, COL_INFO, "");
+    }
 
-		if (bytes >= 4)
-		{
-			proto_item *ti;
-			version = tvb_get_guint8(tvb, offset);
-			length = tvb_get_ntohs(tvb, offset + 2);
+    while (tvb_reported_length_remaining(tvb, offset) !=0) {
+        // might in the middle of the packet
+        if (tvb_get_guint8(tvb, offset) != 3) {
+            col_set_str(pinfo->cinfo, COL_PROTOCOL, "TPKT");
+            col_set_str(pinfo->cinfo, COL_INFO, "Continuation");
+            if (tree) {
+                ti = proto_tree_add_item(tree, proto_rdp, tvb, offset, -1, FALSE);
+                tpkt_tree = proto_item_add_subtree(ti, ett_rdp);
+                proto_item_set_text(ti, "TPKT");
+                proto_tree_add_text(tpkt_tree, tvb, offset, -1, "Continuation data");
+            }
+            return;
+        }
 
-			if (version == 3)
-			{
-				tpkt_offset = offset;
-				ti = proto_tree_add_item(tree, hf_rdp_tpkt, tvb, 0, 4, FALSE);
-				proto_item_set_text(ti, "TPKT Header, Length = %d", length);
-				offset += 4;
-				dissect_x224(tvb, pinfo, tree);
-			}
-		}
-	}
+        length_remaining = tvb_length_remaining(tvb, offset);
+
+        // reassembly the first 4 bytes
+        if (desegment && pinfo->can_desegment) {
+            if (length_remaining < 4) {
+                pinfo->desegment_offset = offset;
+                pinfo->desegment_len = 4 - length_remaining;
+                return;
+            }
+        }
+
+        data_len = tvb_get_ntohs(tvb, offset + 2);
+
+        // reassembly the whole PDU
+        if (desegment && pinfo->can_desegment) {
+            if (length_remaining < data_len) {
+                pinfo->desegment_offset = offset;
+                pinfo->desegment_len = data_len - length_remaining;
+                return;
+            }
+        }
+
+        // dissect the TPKT header
+        saved_proto = pinfo->current_proto;
+        pinfo->current_proto = "TPKT";
+
+        col_set_str(pinfo->cinfo, COL_PROTOCOL, "TPKT");
+
+        if (!desegment && !pinfo->fragmented && check_col(pinfo->cinfo, COL_INFO)) {
+            col_add_fstr(pinfo->cinfo, COL_INFO, "TPKT Data Length = %u", data_len);
+        }
+
+        if (tree) {
+            ti = proto_tree_add_item(tree, proto_rdp, tvb, offset, 4, FALSE);
+            tpkt_tree = proto_item_add_subtree(ti, ett_rdp);
+            proto_item_set_text(ti, "TPKT");
+
+            proto_tree_add_uint(tpkt_tree, hf_rdp_tpkt, tvb, offset + 2, 2, data_len);
+            proto_item_append_text(ti, ", Length: %u", data_len);
+        }
+        pinfo->current_proto = saved_proto;
+
+        offset += 4;
+        data_len -= 4;
+
+        // build a new tvbuffer
+        length = length_remaining -4;
+        if (length > data_len) {
+            length = data_len;
+        }
+        next_tvb = tvb_new_subset(tvb, offset, length, data_len);
+
+        dissect_x224(next_tvb, pinfo, tree);
+
+        offset += length;
+    }
+
+/*
+    if (tree)                                                                 
+    {                                                                         
+        bytes = tvb_length_remaining(tvb, 0);                                 
+                                                                              
+        if (bytes >= 4)                                                       
+        {                                                                     
+            proto_item *ti;                                                   
+            version = tvb_get_guint8(tvb, offset);                            
+            length = tvb_get_ntohs(tvb, offset + 2);                          
+                                                                              
+            if (version == 3)                                                 
+            {                                                                 
+                tpkt_offset = offset;                                         
+                ti = proto_tree_add_item(tree, hf_rdp_tpkt, tvb, 0, 4, FALSE);
+                proto_item_set_text(ti, "TPKT Header, Length = %d", length);  
+                offset += 4;                                                  
+                dissect_x224(tvb, pinfo, tree);                               
+            }                                                                 
+        }                                                                     
+    }                                                                         
+*/
 }
+
+static gboolean tpkt_desegment = TRUE;
 
 static void
 dissect_rdp(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree)
@@ -606,7 +695,7 @@ dissect_rdp(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree)
 
 			col_set_str(pinfo->cinfo, COL_PROTOCOL, "RDP");
 
-			dissect_tpkt(tvb, pinfo, rdp_tree);
+			dissect_tpkt(tvb, pinfo, rdp_tree, tpkt_desegment);
 		}
 	}
 }
@@ -720,6 +809,7 @@ proto_register_rdp(void)
 void
 proto_reg_handoff_rdp(void)
 {
-
+    dissector_handle_t rdp_handle = find_dissector("rdp");
+    dissector_add("tcp.port", TCP_PORT_RDP, rdp_handle);
 }
 
