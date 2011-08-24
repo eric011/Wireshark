@@ -49,6 +49,16 @@ static int hf_rdp_rdp = -1;
 static int hf_rdp_tpkt = -1;
 static int hf_rdp_tpkt_len = -1;
 static int hf_rdp_x224 = -1;
+static int hf_rdp_x224_length		= -1;
+static int hf_rdp_x224_code			= -1;
+static int hf_rdp_x224_src_ref		= -1;
+static int hf_rdp_x224_dst_ref		= -1;
+static int hf_rdp_x224_class		= -1;
+static int hf_rdp_nego_type   		= -1;
+static int hf_rdp_nego_flags   		= -1;
+static int hf_rdp_nego_length   		= -1;
+static int hf_rdp_nego_protocol 		= -1;
+
 static int hf_rdp_mcs = -1;
 static int hf_ts_security_header = -1;
 static int hf_ts_share_control_header = -1;
@@ -165,6 +175,18 @@ static gint ett_ts_caps_set = -1;
 #define X224_DISCONNECT_CONFIRM			0xC
 #define X224_DATA				0xF
 
+#define X224_CODE_CR		0xE
+#define X224_CODE_CC		0xD
+#define X224_CODE_DR		0x8
+#define X224_CODE_DC		0xC
+#define X224_CODE_DT		0xF
+#define X224_CODE_ED		0x1
+#define X224_CODE_AK		0x6
+#define X224_CODE_EA		0x2
+#define X224_CODE_RJ		0x5
+#define X224_CODE_ER		0x7
+
+
 static const value_string capability_set_types[] = {
 	{ CAPSET_TYPE_GENERAL,			"General" },
 	{ CAPSET_TYPE_BITMAP,			"Bitmap" },
@@ -255,6 +277,37 @@ static const value_string x224_tpdu_types[] = {
 	{ X224_DATA,				"Data" },
 	{ 0x0,	NULL }
 };
+
+static const value_string x224_code_vals[] = {
+	{X224_CODE_CR,		"Connection Request"},
+	{X224_CODE_CC,		"Connection Confirm"},
+	{X224_CODE_DR,		"Disconnect Request"},
+	{X224_CODE_DC,		"Disconnect Confirm"},
+	{X224_CODE_DT,		"Data"},
+	{X224_CODE_ED,		"Expedited Data"},
+	{X224_CODE_AK,		"Data Ack"},
+	{X224_CODE_EA,		"Expedited Data Ack"},
+	{X224_CODE_RJ,		"Reject"},
+	{X224_CODE_ER,		"Error"},
+	{0,NULL}
+};
+
+static const value_string nego_protocols[] = {
+	{0,	"Protocol RDP"},
+	{1,	"Protocol SSL"},
+	{2,	"Protocol HYBRID"},
+	{0,NULL}
+};
+
+static const value_string x224_class_option_vals[] = {
+	{0,	"Class 0"},
+	{1,	"Class 1"},
+	{2,	"Class 2"},
+	{3,	"Class 3"},
+	{4,	"Class 4"},
+	{0,NULL}
+};
+
 
 void proto_reg_handoff_rdp(void);
 void dissect_ts_caps_set(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree);
@@ -534,31 +587,136 @@ dissect_mcs(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree)
 	}
 }
 
+static int
+dissect_x224_cr(packet_info *pinfo _U_, proto_tree *tree, tvbuff_t *tvb, int offset)
+{
+    gint remaining;   
+
+	/*DST-REF is always 0 */
+	offset+=2;
+
+	/*SRC-REF*/
+	proto_tree_add_item(tree, hf_rdp_x224_src_ref, tvb, offset, 2, FALSE);
+	offset+=2;
+
+	/* class options */
+	proto_tree_add_item(tree, hf_rdp_x224_class, tvb, offset, 1, FALSE);
+	offset+=1;
+
+    remaining = tvb_length_remaining(tvb, offset);
+    if ( remaining > 8) {
+        // routing Tokens of cookie
+        offset += remaining - 8;
+    }
+
+    // Negotiation Request
+    proto_tree_add_item(tree, hf_rdp_nego_type, tvb, offset, 1, FALSE);
+    offset+=1;
+
+    proto_tree_add_item(tree, hf_rdp_nego_flags, tvb, offset, 1, FALSE);
+    offset+=1;
+
+    // it seems that bytes order are reverse here
+    // take only the first byte
+    proto_tree_add_item(tree, hf_rdp_nego_length, tvb, offset, 1, FALSE);
+    offset+=2;
+
+    // take only the first byte
+    proto_tree_add_item(tree, hf_rdp_nego_protocol, tvb, offset, 1, FALSE);
+    offset+=4;
+
+	return offset;
+}
+
+static int
+dissect_x224_cc(packet_info *pinfo _U_, proto_tree *tree, tvbuff_t *tvb, int offset)
+{
+	/*DST-REF */
+	proto_tree_add_item(tree, hf_rdp_x224_dst_ref, tvb, offset, 2, FALSE);
+	offset+=2;
+
+	/*SRC-REF*/
+	proto_tree_add_item(tree, hf_rdp_x224_src_ref, tvb, offset, 2, FALSE);
+	offset+=2;
+
+	/* class options */
+	proto_tree_add_item(tree, hf_rdp_x224_class, tvb, offset, 1, FALSE);
+	offset+=1;
+
+	return offset;
+}
+
+static int
+dissect_x224_dt(packet_info *pinfo _U_, proto_tree *tree, tvbuff_t *tvb, int offset, proto_tree *parent_tree)
+{
+	proto_item *item = NULL;
+	tvbuff_t *next_tvb;
+
+	//item = proto_tree_add_uint(tree, hf_rdp_x224_class, tvb, 0, 0, FALSE);
+	//PROTO_ITEM_SET_GENERATED(item);
+
+	/* EOT / NR */
+	//proto_tree_add_item(tree, hf_x224_eot, tvb, offset, 1, FALSE);
+	//proto_tree_add_item(tree, hf_x224_nr, tvb, offset, 1, FALSE);
+	offset+=1;
+
+	next_tvb = tvb_new_subset_remaining(tvb, offset);
+	dissect_mcs(next_tvb, pinfo, parent_tree);
+
+	return offset;
+}
+
+
 static void
 dissect_x224(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree)
 {
 	guint8 type;
 	guint8 length;
+    volatile int offset = 0;
 
-	if (tree)
+    proto_tree *subtree = NULL;
+    proto_tree *ti = NULL;
+
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "X.224");
+    col_clear(pinfo->cinfo, COL_INFO);
+
+    length = tvb_get_guint8(tvb, offset);
+
+    if (tree)
 	{
-		bytes = tvb_length_remaining(tvb, 0);
+        ti = proto_tree_add_item(tree, hf_rdp_x224, tvb, offset, length + 1, FALSE);
+        subtree = proto_item_add_subtree(ti, ett_rdp);
 
-		if (bytes > 0)
-		{
-			proto_item *ti;
-			x224_offset = offset;
-			length = tvb_get_guint8(tvb, offset);
-			type = tvb_get_bits8(tvb, (offset + 1) * 8, 4);
+        proto_tree_add_item(subtree, hf_rdp_x224_length, tvb, offset, 1, FALSE);
+        offset += 1;
 
-			if (length > 1)
-			{
-				ti = proto_tree_add_item(tree, hf_rdp_x224, tvb, offset, length + 1, FALSE);
-				proto_item_set_text(ti, "X.224 %s TPDU", val_to_str(type, x224_tpdu_types, "Unknown %d"));
-				offset += (length + 1);
-				dissect_mcs(tvb, pinfo, tree);
-			}
-		}
+        proto_tree_add_item(subtree, hf_rdp_x224_code, tvb, offset, 1, FALSE);
+		type = tvb_get_bits8(tvb, offset * 8, 4);
+        col_add_fstr(pinfo->cinfo, COL_INFO, val_to_str(type, x224_tpdu_types, "Unknown"));
+        offset += 1;
+
+        switch(type) {
+        case X224_CODE_CR:
+            offset = dissect_x224_cr(pinfo, subtree, tvb, offset);
+            break;
+        case X224_CODE_CC:
+            offset = dissect_x224_cc(pinfo, subtree, tvb, offset);
+            break;
+        case X224_CODE_DT:
+            offset = dissect_x224_dt(pinfo, subtree, tvb, offset, tree);
+            break;
+        }
+
+/*
+        if (length > 1)                                                                                   
+        {                                                                                                 
+                                                                                                          
+                proto_item_set_text(ti, "X.224 %s TPDU", val_to_str(type, x224_tpdu_types, "Unknown %d"));
+                offset += (length + 1);                                                                   
+                                                                                                                       
+            }                                                                                             
+        }                                                                                                 
+*/
 	}
 }
 
@@ -764,13 +922,31 @@ proto_register_rdp(void)
 	static hf_register_info hf[] =
 	{
 		{ &hf_rdp_rdp,
-		  { "rdp", "rdp", FT_BYTES, BASE_NONE, NULL, 0x0, NULL, HFILL } },
+		  { "rdp",          "rdp", FT_BYTES, BASE_NONE, NULL, 0x0, NULL, HFILL } },
 		{ &hf_rdp_tpkt,
-		  { "TPKT Header", "rdp.tpkt", FT_NONE, BASE_NONE, NULL, 0x0, NULL, HFILL } },
+		  { "TPKT Header",  "rdp.tpkt", FT_NONE, BASE_NONE, NULL, 0x0, NULL, HFILL } },
         { &hf_rdp_tpkt_len,
-		  { "TPKT Length", "rdp.tpkt.len", FT_UINT16, BASE_DEC, NULL, 0x0, "Length of the whole data unit", HFILL } },
+		  { "TPKT Length",  "rdp.tpkt.len", FT_UINT16, BASE_DEC, NULL, 0x0, "Length of the whole data unit", HFILL } },
 		{ &hf_rdp_x224,
 		  { "X.224 Header", "rdp.x224", FT_NONE, BASE_NONE, NULL, 0x0, NULL, HFILL } },
+        { &hf_rdp_x224_length, 
+          { "X.224 Length", "rdp.x224.length", FT_UINT8, BASE_DEC, NULL, 0, NULL, HFILL }},
+        { &hf_rdp_x224_code, 
+          { "X.224 Code",   "rdp.x224.code", FT_UINT8, BASE_HEX, VALS(x224_code_vals), 0xf0, NULL, HFILL }},
+        { &hf_rdp_x224_src_ref, 
+          { "X.224 SRC-REF","rdp.x224.src_ref", FT_UINT16, BASE_HEX, NULL, 0, NULL, HFILL }},
+        { &hf_rdp_x224_dst_ref, 
+          { "X.224 DST-REF","rdp.x224.dst_ref", FT_UINT16, BASE_HEX, NULL, 0, NULL, HFILL }},
+        { &hf_rdp_x224_class, 
+          { "X.224 Class",  "rdp.x224.class", FT_UINT8, BASE_HEX, VALS(x224_class_option_vals), 0xf0, NULL, HFILL }},
+        { &hf_rdp_nego_type, 
+          { "Negotiation Request Type", "rdp.nego.type", FT_UINT8, BASE_DEC, NULL, 0, NULL, HFILL }},
+        { &hf_rdp_nego_flags, 
+          { "Negotiation Request Flags", "rdp.nego.flags", FT_UINT8, BASE_DEC, NULL, 0, NULL, HFILL }},
+        { &hf_rdp_nego_length, 
+          { "Negotiation Request Length", "rdp.nego.length", FT_UINT16, BASE_DEC, NULL, 0, NULL, HFILL }},
+        { &hf_rdp_nego_protocol, 
+          { "Negotiation Request Protocol", "rdp.nego.protocol", FT_UINT32, BASE_DEC, VALS(nego_protocols), 0, NULL, HFILL }},
 		{ &hf_rdp_mcs,
 		  { "MCS Header", "rdp.mcs", FT_BYTES, BASE_NONE, NULL, 0x0, NULL, HFILL } },
 		{ &hf_ts_security_header,
@@ -788,7 +964,7 @@ proto_register_rdp(void)
 	};
 
 	proto_rdp = proto_register_protocol("Remote Desktop Protocol", "RDP", "rdp");
-	register_dissector("rdp", dissect_rdp, proto_rdp);
+	//register_dissector("rdp", dissect_rdp, proto_rdp);
 
 	proto_register_field_array(proto_rdp, hf, array_length(hf));
 	proto_register_subtree_array(ett, array_length(ett));
@@ -798,7 +974,8 @@ proto_register_rdp(void)
 void
 proto_reg_handoff_rdp(void)
 {
-    dissector_handle_t rdp_handle = find_dissector("rdp");
+    static dissector_handle_t rdp_handle;
+    rdp_handle = create_dissector_handle(dissect_rdp, proto_rdp);
     dissector_add("tcp.port", TCP_PORT_RDP, rdp_handle);
 }
 
