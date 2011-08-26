@@ -530,6 +530,7 @@ dissect_mcs(tvbuff_t *tvb, packet_info *pinfo _U_ , proto_tree *tree)
 	guint16 channelId;
 	guint16 length;
 	guint16 real_length;
+    volatile gint offset = 0;
 
 	if (tree)
 	{
